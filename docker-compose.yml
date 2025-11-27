@@ -1,0 +1,35 @@
+version: '3.8'
+
+services:
+  # The Core API Service
+  api:
+    build: 
+      context: .
+      dockerfile: Dockerfile
+    container_name: atlas_core_api
+    ports:
+      - "8000:8000"
+    environment:
+      - APP_ENV=development
+      - MAX_WORKERS=4
+    volumes:
+      # Hot reload for development
+      - ./app:/app/app
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # In a real integration scenario, we would uncomment these:
+  # redis:
+  #   image: redis:7-alpine
+  #   ports: ["6379:6379"]
+  
+  # zookeeper:
+  #   image: confluentinc/cp-zookeeper:7.3.0
+  
+  # kafka:
+  #   image: confluentinc/cp-kafka:7.3.0
+  #   depends_on: [zookeeper]
