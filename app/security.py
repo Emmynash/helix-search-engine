@@ -1,11 +1,11 @@
 import socket
 import ipaddress
+import asyncio
 from urllib.parse import urlparse
 from fastapi import HTTPException
 
 # Senior Dev Logic: Explicitly define forbidden networks to prevent SSRF
-# We block Loopback (127.0.0.0/8), Private ranges (10., 172.16., 192.168.),
-# and Link-Local (169.254. - critical for cloud metadata protection).
+# We block Loopback, Private ranges, and Link-Local (cloud metadata).
 BLOCKED_NETWORKS = [
     ipaddress.ip_network("127.0.0.0/8"),
     ipaddress.ip_network("10.0.0.0/8"),
@@ -15,10 +15,10 @@ BLOCKED_NETWORKS = [
     ipaddress.ip_network("::1/128"),
 ]
 
-def validate_url_safety(url: str):
+async def validate_url_safety(url: str):
     """
-    Resolves the hostname to an IP and verifies it is not internal.
-    Prevents SSRF attacks.
+    Resolves hostname to IP asynchronously to prevent event loop blocking.
+    This protects the main thread from freezing during slow DNS lookups.
     """
     try:
         parsed = urlparse(url)
@@ -26,16 +26,18 @@ def validate_url_safety(url: str):
         if not hostname:
             raise ValueError("Invalid hostname")
 
-        # Resolve DNS
-        # Note: In production, use an async DNS resolver (like aiodns) to avoid blocking the event loop
+        # FIX: Get the running event loop to offload the blocking socket call
+        loop = asyncio.get_running_loop()
         try:
-            ip_str = socket.gethostbyname(hostname)
+            # run_in_executor(None, ...) uses the default ThreadPoolExecutor
+            # This allows the blocking gethostbyname to run in a separate thread
+            ip_str = await loop.run_in_executor(None, socket.gethostbyname, hostname)
         except socket.gaierror:
             raise HTTPException(status_code=400, detail="Could not resolve hostname")
 
         ip = ipaddress.ip_address(ip_str)
 
-        # Check if the resolved IP belongs to a blocked network
+        # Check against blocked networks
         for network in BLOCKED_NETWORKS:
             if ip in network:
                 raise HTTPException(
