@@ -55,8 +55,7 @@ docker-compose up -d
 
 ## Development
 
-- Run tests: `pytest` (if tests are present).
-- Linting: `ruff` / `black` (if configured in the repo).
+- Run tests: `pytest`.
 
 ## Contributing
 
@@ -64,5 +63,5 @@ Please open issues or pull requests against the `main` branch. Follow the code s
 
 ## License
 
-See `LICENSE` (if present) for license details.
+See `LICENSE`.
 
