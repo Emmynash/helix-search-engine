@@ -1,3 +1,4 @@
+import uuid
 from fastapi import APIRouter, HTTPException, Depends, Header, status
 from typing import Optional
 from datetime import datetime, timedelta
@@ -12,30 +13,24 @@ from .services import queue_service, search_service, job_store, QueueService, Se
 router = APIRouter()
 
 # --- Dependencies ---
-# Logic: Common dependency for Rate Limiting or Auth
 async def verify_token(authorization: str = Header(...)):
     if not authorization.startswith("Bearer "):
         raise HTTPException(status_code=401, detail="Invalid token format")
-    # In prod, decode JWT here
     return True
 
-# --- 1. Search Endpoint ---
+# --- Search Endpoint ---
 @router.get("/search", response_model=SearchResponse)
 async def search_pages(
     q: str, 
     limit: int = 10, 
     cursor: Optional[str] = None,
-    # Injecting service allows for easy testing mocks later
     engine: SearchEngine = Depends(lambda: search_service)
 ):
     if len(q) < 2:
         raise HTTPException(status_code=400, detail="Query too short")
     
     start_time = datetime.now()
-    
-    # Call the service layer (The "Read Path" in architecture)
     results = await engine.query(q, limit, cursor)
-    
     execution_time = (datetime.now() - start_time).total_seconds() * 1000
     
     return {
@@ -47,36 +42,53 @@ async def search_pages(
         }
     }
 
-# --- 2. Crawl Endpoint (The SLA Critical Path) ---
+# --- Crawl Endpoint (Fixed) ---
 @router.post(
     "/crawl", 
     response_model=CrawlResponse, 
     status_code=status.HTTP_202_ACCEPTED,
-    dependencies=[Depends(verify_token)] # Auth required for writes
+    dependencies=[Depends(verify_token)]
 )
 async def request_recrawl(
     payload: CrawlRequest,
-    queue: QueueService = Depends(lambda: queue_service)
+    queue: QueueService = Depends(lambda: queue_service),
+    store: JobStore = Depends(lambda: job_store)
 ):
-    """
-    Accepts a crawl request and offloads it to the High Priority Queue.
-    Returns immediately with 202 Accepted.
-    """
-    # 1. Push to Kafka (Async I/O)
-    job_id = await queue.push_job(str(payload.url), JobPriority.HIGH)
+    # 1. Generate ID (The API is the source of truth for IDs)
+    job_id = f"job_{uuid.uuid4().hex[:8]}"
     
-    # 2. Calculate SLA (1 hour from now)
-    sla_time = datetime.now() + timedelta(hours=1)
+    # 2. FIX: Write to DB FIRST (Guarantees no 404s on immediate poll)
+    await store.create_job(job_id, JobStatus.QUEUED)
     
-    # 3. Return Job ID immediately
+    # 3. Check System Load for SLA Calculation
+    q_depth = await queue.get_queue_depth(JobPriority.HIGH)
+    
+    # Dynamic SLA Logic: 
+    # Assume 1 second processing time per job + 30s buffer.
+    # If queue is deep, this time moves further out, being honest with the user.
+    estimated_seconds = (q_depth * 1.0) + 30
+    sla_time = datetime.now() + timedelta(seconds=estimated_seconds)
+
+    # 4. Push to Queue (With Circuit Breaker logic)
+    success = await queue.push_job(job_id, str(payload.url), JobPriority.HIGH)
+    
+    if not success:
+        # Rollback or Mark Failed if Queue is down
+        await store.create_job(job_id, JobStatus.FAILED)
+        raise HTTPException(
+            status_code=503, 
+            detail="Ingestion queue unavailable. Please try again later."
+        )
+    
     return {
         "job_id": job_id,
         "status": JobStatus.QUEUED,
         "priority": JobPriority.HIGH,
-        "estimated_completion": sla_time
+        "estimated_completion": sla_time,
+        "queue_position": q_depth
     }
 
-# --- 3. Job Status Endpoint ---
+# --- Job Status Endpoint ---
 @router.get("/jobs/{job_id}", response_model=JobStatusResponse)
 async def get_job_status(
     job_id: str,

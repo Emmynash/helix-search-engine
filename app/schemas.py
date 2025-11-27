@@ -2,8 +2,8 @@ from pydantic import BaseModel, Field, HttpUrl, field_validator
 from typing import List, Optional
 from datetime import datetime
 from enum import Enum
+from .security import validate_url_safety
 
-# --- Enums for strict typing ---
 class JobStatus(str, Enum):
     QUEUED = "queued"
     PROCESSING = "processing"
@@ -11,27 +11,25 @@ class JobStatus(str, Enum):
     FAILED = "failed"
 
 class JobPriority(str, Enum):
-    HIGH = "high"       # User requested (SLA)
-    LOW = "low"         # Background crawl
+    HIGH = "high"
+    LOW = "low"
 
-# --- Request Models ---
 class CrawlRequest(BaseModel):
     url: HttpUrl
-    depth: int = Field(default=1, ge=1, le=3, description="Depth restricted to 3 for performance")
+    depth: int = Field(default=1, ge=1, le=3, description="Recursion depth (max 3)")
     
     @field_validator('url')
-    def validate_domain(cls, v):
-        # Senior Dev Logic: Block internal IPs or known bad actors here
-        if "localhost" in str(v):
-            raise ValueError("Cannot crawl local networks")
+    def validate_security(cls, v):
+        # Delegate to the robust security module
+        validate_url_safety(str(v))
         return v
 
-# --- Response Models ---
 class CrawlResponse(BaseModel):
     job_id: str
     status: JobStatus
     priority: JobPriority
     estimated_completion: datetime
+    queue_position: Optional[int] = None  # Transparency for the user
 
 class SearchResult(BaseModel):
     id: str
@@ -42,7 +40,7 @@ class SearchResult(BaseModel):
 
 class SearchResponse(BaseModel):
     data: List[SearchResult]
-    meta: dict  # Contains cursor, total_hits, execution_time
+    meta: dict
 
 class JobStatusResponse(BaseModel):
     job_id: str
